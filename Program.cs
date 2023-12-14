@@ -35,6 +35,10 @@ string WB_TAG = "Waypoints";
 string SB_TAG = "RCC_Indicator";
 const string SL_TAG = "RCC_Signal", Sensor_TAG = "RCC_Boost";
 
+#region mdk preserve
+enum FlagType { None, Red, Yellow, DoubleYellow, Blue }
+#endregion
+
 const double timeLimit = 0.1, blocksUpd = 10, errUpd = 15, iniUpd = 1, statisticsUpd = 0.5;
 double timeForUpdateAP = 0, timeForUpdateINI = 0, timeForUpdateBlocks = 0, timeToClearErrors = 0, timeForAlarmDelay = 0, timeForUpdateStatistics = 0;
 bool wasMainPartExecuted = false;
@@ -265,7 +269,11 @@ void ParseCarsList(string list)
 			IsDisqualified = bool.Parse(elements[8]),
 			Log = "",
 			OldWear = 0,
-			OldTire = elements[2]
+			OldTire = elements[2],
+			Position = Vector3D.Zero,
+			OldPosition = Vector3D.Zero,
+			Speed = 0,
+			Flag = ""
 		};
 		raceBase.Cars.Add(newCar);
 	}
@@ -440,6 +448,11 @@ public void Main(string argument, UpdateType uType)
 			{
 				case "workmode": WorkMode = "car"; changeMode = true; SaveStorage(); Initialize(); break;
 				case "clear": StorageIni.Set("Storage", "Cars List", ""); Storage = StorageIni.ToString(); SB.Request("Yes"); break;
+				case "none": transponder.SendToCars("0", "flag", "None"); break;
+				case "yellow": transponder.SendToCars("0", "flag", "Yellow"); break;
+				case "red": transponder.SendToCars("0", "flag", "Red"); break;
+				case "blue": transponder.SendToCars("0", "flag", "Blue"); break;
+				case "doubleyellow": transponder.SendToCars("0", "flag", "DoubleYellow"); break;
 				default: break;
 			}
 
@@ -711,6 +724,7 @@ class RaceBase
 {
 	public string StartBeaconTag = "RW_Start", StopBeaconTag = "RW_Stop";
 	bool Ready = false;
+	public bool autoFlags = true;
 	Transponder tp;
 	Program Parent;
 	List<IMyTerminalBlock> Blocks;
@@ -744,6 +758,7 @@ class RaceBase
 		ListenToCars();
 		UpdateLogList();
 		CheckToDisqualify();
+		if (autoFlags) SendFlags();
 		UpdateCarsList();
 	}
 	void ListenToCars()
@@ -754,7 +769,7 @@ class RaceBase
 	void UpdateCarsList()
 	{
 		SBCars.Clear();
-		SBCars.Append("                      === PILOTS DASHBOARD ===\n\n PN | TIRE | WEAR % | FUEL % | PITLANE | LIMITER | BOOST | ENG | DSQ\n");
+		SBCars.Append("                         === PILOTS DASHBOARD ===\n\n PN | TIRE | WEAR % | FUEL % | PITLANE | LIMITER | BOOST | ENG | FLAG | DSQ\n");
 
 		foreach (var car in Cars)
 		{
@@ -767,6 +782,7 @@ class RaceBase
 				"| " + (car.IsSpeedLimited ? "LIMITED" : "").PadRight(8) +
 				"| " + (car.IsBoostOn ? "BOOST" : "").PadRight(6) +
 				"| " + (car.IsEngineOn ? " ON" : "OFF").PadRight(4) +
+				"| " + (car.Flag).PadRight(5) +
 				"| " + (car.IsDisqualified ? "DSQ" : "").PadRight(3) + "\n");
 		}
 	}
@@ -793,6 +809,68 @@ class RaceBase
 				else if (car.OldWear > car.CurrentWear && !car.IsOnPitlane)
 				{
 					car.IsDisqualified = true; SBLog.Append(DateTime.Now.ToLongTimeString()+" | DSQ | " + car.PN + " | " + car.CurrentWear +" < " + car.OldWear + " | LESS WEAR OUTSIDE THE PITLANE\n");
+				}
+			}
+		}
+	}
+
+	void SendFlags()
+	{
+		double speedLimit = 10; // Ограничение по скорости
+		double yellowFlagDistance = 100; // Расстояние для желтого флага
+		double doubleYellowFlagDistance = 35; // Расстояние для двойного желтого флага
+
+		for (int i = 0; i < Cars.Count; i++)
+		{
+			Car currentCar = Cars[i];
+
+			if (currentCar.Speed < speedLimit && !currentCar.IsOnPitlane)
+			{
+				// Проверка для желтого флага и двойного желтого флага
+				for (int j = 0; j < Cars.Count; j++)
+				{
+					if (i != j)
+					{
+						Car otherCar = Cars[j];
+                        if (otherCar.IsOnPitlane) continue;
+                        double distance = Vector3D.Distance(currentCar.Position, otherCar.Position);
+
+						if (distance <= yellowFlagDistance && otherCar.Flag == "")
+						{
+							tp.SendToCars(otherCar.PN.ToString(), "flag", "Yellow");
+                            SBLog.Append(DateTime.Now.ToLongTimeString() + " | FLAG | " + otherCar.PN + " | YELLOW | DUE TO " + currentCar.PN + " PROBLEMS\n");
+                        }
+                        else if (otherCar.Flag == "YEL" || otherCar.Flag == "DYEL")
+                        {
+                            tp.SendToCars(otherCar.PN.ToString(), "flag", "None");
+                            SBLog.Append(DateTime.Now.ToLongTimeString() + " | FLAG | " + otherCar.PN + " | NONE | RELEASE FROM YELLOW\n");
+                        }
+
+                        if (distance <= doubleYellowFlagDistance && otherCar.Speed < speedLimit && !otherCar.IsOnPitlane)
+						{
+							// Проверка для машин, находящихся на расстоянии 100 метров от двух машин
+							for (int k = 0; k < Cars.Count; k++)
+							{
+								Car thirdCar = Cars[k];
+								if (thirdCar.IsOnPitlane) continue;
+								double distanceToPair = Math.Min(
+									Vector3D.Distance(currentCar.Position, thirdCar.Position),
+									Vector3D.Distance(otherCar.Position, thirdCar.Position)
+								);
+
+								if (distanceToPair <= yellowFlagDistance && thirdCar.Flag == "")
+								{
+									tp.SendToCars(thirdCar.PN.ToString(), "flag", "DoubleYellow");
+									SBLog.Append(DateTime.Now.ToLongTimeString() + " | FLAG | " + thirdCar.PN + " | DOUBLE YELLOW | DUE TO COLLISION BETWEEN " + currentCar.PN + " AND " + otherCar.PN + "\n");
+								}
+								else if (thirdCar.Flag == "YEL" || thirdCar.Flag == "DYEL")
+								{
+									tp.SendToCars(thirdCar.PN.ToString(), "flag", "None");
+                                    SBLog.Append(DateTime.Now.ToLongTimeString() + " | FLAG | " + thirdCar.PN + " | NONE | RELEASE FROM DOUBLE YELLOW\n");
+                                }
+							}
+						}
+					}
 				}
 			}
 		}
@@ -853,6 +931,10 @@ class Car
 	public double TimeOffline { get; set; }
 	public bool IsDisqualified { get; set; }
 	public string Log { get; set; }
+	public Vector3D Position { get; set; }
+	public Vector3D OldPosition { get; set; }
+	public double Speed { get; set; }
+	public string Flag { get; set; }
 }
 #endregion
 #region Transponder
@@ -895,14 +977,17 @@ class Transponder
 			Message = Reciever.AcceptMessage();
 			string receivedData = Message.Data.ToString();
 			string[] parsingRecieved = receivedData.Split('|');
-			if (parsingRecieved.Length == 8)
+			if (parsingRecieved.Length == 11)
 			{
 				int pn = int.Parse(parsingRecieved[0]);
 				if (pn == 0) continue;
-				string tire = parsingRecieved[1];
+				string tire = parsingRecieved[1], flag = parsingRecieved[10];
 				double wear = double.Parse(parsingRecieved[2]), fuel = double.Parse(parsingRecieved[3]);
 				bool pitlane = bool.Parse(parsingRecieved[4]), limiter = bool.Parse(parsingRecieved[5]),
 					boost = bool.Parse(parsingRecieved[6]), engine = bool.Parse(parsingRecieved[7]);
+				Vector3D carPosition = Vector3D.Zero; Vector3D.TryParse(parsingRecieved[8], out carPosition);
+				double speed = double.Parse(parsingRecieved[9]);
+				
 
 				var existingCar = cars.FirstOrDefault(x => x.PN == pn);
 
@@ -917,12 +1002,16 @@ class Transponder
 					existingCar.IsSpeedLimited = limiter;
 					existingCar.IsBoostOn = boost;
 					existingCar.IsEngineOn = engine;
+					existingCar.OldPosition = existingCar.Position;
+					existingCar.Position = carPosition;
+					existingCar.Flag = flag;
+					existingCar.Speed = speed;
 					existingCar.TimeOffline = 0;
 				}
 				else
 				{
 					existingCar = new Car() { Log = "",CurrentTire = tire, OldTire = tire, PN = pn, CurrentWear = wear, OldWear = wear, FuelPercent = fuel, IsOnPitlane = pitlane,
-					IsSpeedLimited = limiter, IsBoostOn = boost, IsEngineOn = engine, IsDisqualified = false, TimeOffline = 0};
+					IsSpeedLimited = limiter, IsBoostOn = boost, IsEngineOn = engine, IsDisqualified = false, OldPosition = carPosition, Position = carPosition, Speed = speed, Flag = flag, TimeOffline = 0};
 					cars.Add(existingCar);
 				}
 			}
@@ -956,9 +1045,9 @@ class Transponder
 		IGC.SendBroadcastMessage<string>(BaseChannel, pn + "|" + log, TransmissionDistance.AntennaRelay);
 	}
 
-	public void SendToBase(int pn, string tire, double wear, double fuel, bool pitlane, bool limiter, bool boost, bool engine)
+	public void SendToBase(int pn, string tire, double wear, double fuel, bool pitlane, bool limiter, bool boost, bool engine, Vector3D myPosition, double speed, string flag)
 	{
-		IGC.SendBroadcastMessage<string>(BaseChannel, pn + "|" + tire + "|" + wear + "|" + fuel + "|" + pitlane + "|" + limiter + "|" + boost + "|" + engine, TransmissionDistance.AntennaRelay);
+		IGC.SendBroadcastMessage<string>(BaseChannel, pn + "|" + tire + "|" + wear + "|" + fuel + "|" + pitlane + "|" + limiter + "|" + boost + "|" + engine + "|" + myPosition.ToString() + "|" + speed + "|" + flag, TransmissionDistance.AntennaRelay);
 	}
 
 	public void SendToCars(string num, string arg, string text)
@@ -987,10 +1076,11 @@ class SoundBlock
 			case "ObjComp": AddAction("SoundBlockObjectiveComplete", Color.LimeGreen, 1, 2, 2); break;
 			case "Yes": AddAction("SoundBlockAlert2", Color.SpringGreen, 10, 0.05, 0.05); break;
 			case "No": AddAction("SoundBlockAlert1", Color.OrangeRed, 10, 0.05, 0.05); break;
-			case "YellowFlag": AddAction("MusComp_08", Color.Yellow, 4, 0.1, 0.1); break;
-			case "BlueFlag": AddAction("MusComp_08", Color.Blue, 4, 0.1, 0.1); break;
-			case "RedFlag": AddAction("MusComp_08", Color.Red, 4, 0.1, 0.1); break;
-			case "BlackFlag": AddAction("MusComp_08", Color.Red, 4, 0.1, 0.1); break;
+			case "YellowFlag": AddAction("MusComp_08", Color.Yellow, 1, 0.5, 0.5); break;
+			case "DoubleYellowFlag": AddAction("MusComp_08", Color.Yellow, 2, 0.5, 0.5); break;
+			case "BlueFlag": AddAction("MusComp_08", Color.Blue, 1, 0.5, 0.5); break;
+			case "RedFlag": AddAction("MusComp_08", Color.Red, 1, 0.5, 0.5); break;
+			case "GreenFlag": AddAction("MusComp_08", Color.Green, 1, 0.5, 0.5); break;
 			default: break;
 		}
 	}
@@ -1060,14 +1150,14 @@ class Controller
 	Program Parent;
 	StringBuilder SBCar, SBNav, SBTires, SBErrors;
 	public int pN = 0;
-
+	public FlagType currentFlag = FlagType.None, lastFlag = FlagType.None;
 	Vector3D MyPos, MyVel, GravityVector;
 
 	bool speedRecorded = false, speedLimited = false, powerRecorded = false, powerLimited = false;
 	Vector3D pitLaneVector = Vector3D.Zero, normalizedPitLaneVector = Vector3D.Zero;
 	public Vector3D MyBase = new Vector3D(0, 0, 0), pitLaneStart = new Vector3D(0, 0, 0), pitLaneEnd = new Vector3D(0, 0, 0);
 	public double pitLaneTreshold = 15, pitLaneMinusTreshold = 0, baseTreshold = 5;
-	public double speedLimit = 80, userSpeed = 360, powerLimit = 5, userPower = 90, maxPower = 90, boostPower = 100;
+	public double speedLimit = 80, yellowFlagLimit = 150, doubleYellowFlagLimit = 100, userSpeed = 360, powerLimit = 5, userPower = 90, maxPower = 90, boostPower = 100;
 	double distanceToPitLane = 0, distanceToBase = 0, pitlaneDotProduct = 0;
 
 	int fuelInEngines = 0; double fuel = 0, maxFuel = 0, fuelAvrEMA = 0, fuelEMA_A = 0.05, oldFuel = 0; string fuelRemainingTime = "";
@@ -1218,25 +1308,7 @@ class Controller
 		}
 		else if (powerLimited) { LimitMaxPower(false); powerLimited = false; lastEngineWorking = engineWorking; tp.SendLogToBase(pN, (DateTime.Now.ToLongTimeString() + " / POWER UNLIMIT / " + pN + " / DISENGAGE POWER LIMIT DUE TO ENGINE ON\n"));}
 
-
-		if (onPitLane)
-		{
-			if (boostEngaged)
-			{
-				BoostMaxPower(false);
-				boostEngaged = false;
-				tp.SendLogToBase(pN, (DateTime.Now.ToLongTimeString() + " / BOOST OFF / " + pN + " / DISENGAGE BOOST DUE TO ENTERING PITLANE\n"));
-			}
-			LimitMaxSpeed(true);
-			speedLimited = true;
-			if(lastOnPitlane != onPitLane)
-			{
-				lastOnPitlane = onPitLane;
-				tp.SendLogToBase(pN, (DateTime.Now.ToLongTimeString() + " / SPEED LIMIT / " + pN + " / ENGAGE SPEED LIMIT DUE TO ENTERING PITLANE\n"));
-			}
-		}
-		else if(speedLimited) { LimitMaxSpeed(false); speedLimited = false; lastOnPitlane = onPitLane; tp.SendLogToBase(pN, (DateTime.Now.ToLongTimeString() + " / SPEED UNLIMIT / " + pN + " / DISENGAGE SPEED LIMIT DUE TO LEAVING PITLANE\n")); }
-
+		RunSpeedLimitControl();
 		
 		if (CheckDistanceToBase() && tireRequested && MyVelHor < 0.5)
 		{
@@ -1259,20 +1331,17 @@ class Controller
 		CurrentTire.UpdateWear(Math.Abs(MyHorAcceleration), Math.Abs(Forward), Math.Abs(Right));
 
 		SetFriction(CurrentTire.Friction);
-
-		
-		
-			
 		
 		updateTiresList();
 		updateCarList();
 		updateNavList();
+		lastFlag = currentFlag;
 		return false;
 	}
 
 	public void Update1()
 	{
-		tp.SendToBase(pN, GetTireType(CurrentTire.Type), R(CurrentTire.Wear * 100, 1), R((fuel / maxFuel) * 100, 1), onPitLane, speedLimited, boostEngaged, engineWorking);
+		tp.SendToBase(pN, GetTireType(CurrentTire.Type), R(CurrentTire.Wear * 100, 1), R((fuel / maxFuel) * 100, 1), onPitLane, speedLimited, boostEngaged, engineWorking, MyPos, Math.Abs(Forward), GetFlagType(currentFlag));
 		ListenToBase();
 	}
 	public string CreateSaveLog(bool onOff)
@@ -1292,7 +1361,7 @@ class Controller
 
 			if (pn == pN || pn == 0)
 			{
-				bool success = false;
+				bool success = false, signal = true;
 				switch (parsingRecieved[1].ToLower())
 				{
 					case "mybase": MyBase = Parent.ParsePoint(parsingRecieved[2]); success = true; break;
@@ -1308,9 +1377,10 @@ class Controller
 					case "password": password = parsingRecieved[2]; success = true; break;
 					case "addtire": string[] tire2 = parsingRecieved[2].Split(':'); if (tire2.Length == 2) success = AddTireToSets(tire2[0], tire2[1]); break;
 					case "remove": success = RemoveMostWornTire(parsingRecieved[2]); break;
+					case "flag": signal = false; SetFlag(parsingRecieved[2]); break;
 					default: break;
 				}
-				if (success) SB.Request("Yes"); else SB.Request("No");
+				if (signal) { if (success) SB.Request("Yes"); else SB.Request("No"); }
 				Parent.SaveStorage();
 			}
 		}
@@ -1439,6 +1509,41 @@ class Controller
 	public string GetNav()
 	{
 		return SBNav.ToString();
+	}
+			#endregion
+
+	#region Flags
+	public void SetFlag(string type)
+	{
+		FlagType flag = FlagType.None;
+		if (Enum.TryParse(type, out flag)) currentFlag = flag;
+		if(lastFlag != currentFlag)
+		{
+			switch (currentFlag)
+			{
+				case FlagType.None: SB.Request("GreenFlag"); break;
+				case FlagType.Yellow: SB.Request("YellowFlag"); break;
+				case FlagType.DoubleYellow: SB.Request("DoubleYellowFlag"); break;
+				case FlagType.Red: SB.Request("RedFlag"); break;
+				case FlagType.Blue: SB.Request("BlueFlag"); break;
+				default: break;
+			}
+		}
+	}
+	string GetFlagType(FlagType Flag)
+	{
+		string flag = "";
+		switch (Flag)
+		{
+			case FlagType.None: flag = ""; break;
+			case FlagType.Yellow: flag = "YEL"; break;
+			case FlagType.DoubleYellow: flag = "DYEL"; break;
+			case FlagType.Red: flag = "RED"; break;
+			case FlagType.Blue: flag = "BLUE"; break;
+
+			default: break;
+		}
+		return flag;
 	}
 	#endregion
 
@@ -1805,23 +1910,91 @@ class Controller
 		pitLaneMinusTreshold = pitLaneVector.Length() - pitLaneTreshold;
 	}
 
-	void LimitMaxSpeed(bool condition)
+	void RunSpeedLimitControl()
 	{
-		if (CheckMaxSpeed(condition) == condition) return;
+		if (onPitLane || currentFlag.Equals(FlagType.Yellow) || currentFlag.Equals(FlagType.DoubleYellow))
+		{
+			if (boostEngaged)
+			{
+				BoostMaxPower(false);
+				boostEngaged = false;
+				tp.SendLogToBase(pN, (DateTime.Now.ToLongTimeString() + " / BOOST OFF / " + pN + " / DISENGAGE BOOST DUE TO ENGAGEING LIMITER\n"));
+			}
+
+			if (onPitLane)
+			{
+				LimitMaxSpeed(true, speedLimit);
+				speedLimited = true;
+				if (lastOnPitlane != onPitLane)
+				{
+					lastOnPitlane = onPitLane;
+					tp.SendLogToBase(pN, (DateTime.Now.ToLongTimeString() + " / SPEED LIMIT / " + pN + " / ENGAGE SPEED LIMIT DUE TO ENTERING PITLANE\n"));
+				}
+			}
+			else if (currentFlag.Equals(FlagType.Yellow))
+			{
+				LimitMaxSpeed(true, yellowFlagLimit);
+				speedLimited = true;
+				if (lastFlag != currentFlag)
+				{
+					lastFlag = currentFlag;
+					tp.SendLogToBase(pN, (DateTime.Now.ToLongTimeString() + " / SPEED LIMIT / " + pN + " / ENGAGE SPEED LIMIT DUE TO YELLOW FLAG\n"));
+				}
+			}
+			else if (currentFlag.Equals(FlagType.DoubleYellow))
+			{
+				LimitMaxSpeed(true, doubleYellowFlagLimit);
+				speedLimited = true;
+				if (lastFlag != currentFlag)
+				{
+					lastFlag = currentFlag;
+					tp.SendLogToBase(pN, (DateTime.Now.ToLongTimeString() + " / SPEED LIMIT / " + pN + " / ENGAGE SPEED LIMIT DUE TO DOUBLE YELLOW FLAG\n"));
+				}
+			}
+		}
+		else if (speedLimited)
+		{
+			if (lastOnPitlane)
+			{
+				LimitMaxSpeed(false, speedLimit);
+				speedLimited = false;
+				lastOnPitlane = onPitLane;
+				tp.SendLogToBase(pN, (DateTime.Now.ToLongTimeString() + " / SPEED UNLIMIT / " + pN + " / DISENGAGE SPEED LIMIT DUE TO LEAVING PITLANE\n"));
+			}
+			else if (lastFlag.Equals(FlagType.Yellow))
+			{
+				LimitMaxSpeed(false, yellowFlagLimit);
+				speedLimited = false;
+				lastFlag = currentFlag;
+				tp.SendLogToBase(pN, (DateTime.Now.ToLongTimeString() + " / SPEED UNLIMIT / " + pN + " / DISENGAGE YELLOW FLAG SPEED LIMIT\n"));
+			}
+			else if (lastFlag.Equals(FlagType.DoubleYellow))
+			{
+				LimitMaxSpeed(false, doubleYellowFlagLimit);
+				speedLimited = false;
+				lastFlag = currentFlag;
+				tp.SendLogToBase(pN, (DateTime.Now.ToLongTimeString() + " / SPEED UNLIMIT / " + pN + " / DISENGAGE DOUBLE YELLOW FLAG SPEED LIMIT\n"));
+			}
+		}
+	}
+
+	void LimitMaxSpeed(bool condition, double localLimit)
+	{
+		if (CheckMaxSpeed(condition, localLimit) == condition) return;
 		if (condition) tp.SendLogToBase(pN, (DateTime.Now.ToLongTimeString() + " / SPEED LIMIT / " + pN + " / TRYING TO LIMIT MAX SPEED\n"));
 		else tp.SendLogToBase(pN, (DateTime.Now.ToLongTimeString() + " / SPEED LIMIT / " + pN + " / TRYING TO RETURN MAX SPEED\n"));
 		if (condition && !speedRecorded) { userSpeed = wheels.First().GetValueFloat("Speed Limit"); speedRecorded = true; }
 		else if (!condition && speedRecorded) speedRecorded = false;
 
-		foreach (var block in wheels) block.SetValueFloat("Speed Limit", condition ? (float)speedLimit : (float)userSpeed);
+		foreach (var block in wheels) block.SetValueFloat("Speed Limit", condition ? (float)localLimit : (float)userSpeed);
 		
 		if (condition) SB.Request("BrakesOn"); else SB.Request("BrakesOff");
 	}
 
-	bool CheckMaxSpeed(bool condition)
+	bool CheckMaxSpeed(bool condition, double localLimit)
 	{
 		foreach (var wheel in wheels)
-		if (condition ? (wheel.GetValueFloat("Speed Limit") != speedLimit) : (wheel.GetValueFloat("Speed Limit") == speedLimit)) return !condition; return condition;
+		if (condition ? (wheel.GetValueFloat("Speed Limit") != localLimit) : (wheel.GetValueFloat("Speed Limit") == localLimit)) return !condition; return condition;
 	}
 
 	void LimitMaxPower(bool condition)
