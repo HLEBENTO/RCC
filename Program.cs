@@ -181,7 +181,8 @@ void SaveStorage()
 				+ ':' + car.IsOnPitlane.ToString()
 				+ ':' + car.IsSpeedLimited.ToString()
 				+ ':' + car.IsBoostOn.ToString()
-				+ ':' + car.IsDisqualified.ToString();
+				+ ':' + car.IsDisqualified.ToString()
+				+ ':' + car.localFlag.ToString();
 			if (!car.Equals(raceBase.Cars.Last())) carList += ";";
 		}
 		StorageIni.Set("Storage", "Cars List", carList);
@@ -257,6 +258,8 @@ void ParseCarsList(string list)
 		string[] elements = line.Split(':');
 		int testZero = 0;
 		if (!Int32.TryParse(elements[0], out testZero) || testZero == 0) continue;
+		FlagType flag = FlagType.None; Enum.TryParse(elements[9], out flag);
+
 		Car newCar = new Car() {
 			PN = Int32.Parse(elements[0]),
 			TimeOffline = double.Parse(elements[1]),
@@ -267,13 +270,14 @@ void ParseCarsList(string list)
 			IsSpeedLimited = bool.Parse(elements[6]),
 			IsBoostOn = bool.Parse(elements[7]),
 			IsDisqualified = bool.Parse(elements[8]),
+			localFlag = flag,
 			Log = "",
 			OldWear = 0,
 			OldTire = elements[2],
 			Position = Vector3D.Zero,
 			OldPosition = Vector3D.Zero,
 			Speed = 0,
-			Flag = ""
+			returnedFlag = ""
 		};
 		raceBase.Cars.Add(newCar);
 	}
@@ -304,6 +308,7 @@ public void ParseIni()
 	}
 	if (WorkMode == "base")
 	{
+		raceBase.autoFlags = Ini.Get("Settings", "Auto Flags On").ToBoolean(raceBase.autoFlags);
 		//SB.ServiceEnabled = Ini.Get("Airport Settings", "Use Sound Block").ToBoolean(SB.ServiceEnabled);
 	}
 }
@@ -321,6 +326,7 @@ public void Save()
 	}
 	if (WorkMode == "base")
 	{
+		Ini.Set("Settings", "Auto Flags On", raceBase.autoFlags);
 		//Ini.Set("Airport Settings", "Use Sound Block", SB.ServiceEnabled);
 	}
 
@@ -698,7 +704,7 @@ class DisplayScheduler
 		{
 			if (BaseLCDs.Count > 0) foreach (var thisScreen in BaseLCDs) thisScreen.WriteText(raceBase.GetCarsList());
 			else MyScreenData.Append("\n LCD Error:\n '" + LCD_TAG[0] + LCD_TAG[4] + "' displays were not found.\n");
-			if (LogLCDs.Count > 0 ) { if (raceBase.GetLogList().Length > 1) { string currentText = LogLCDs.First().GetText(); currentText += raceBase.GetLogList(); raceBase.ClearLogList(); foreach (var thisScreen in LogLCDs) thisScreen.WriteText(currentText); } }
+			if (LogLCDs.Count > 0 ) { if (raceBase.GetLogList().Length > 1) { string newText = LogLCDs.First().GetText(); newText += raceBase.GetLogList(); raceBase.ClearLogList(); foreach (var thisScreen in LogLCDs) thisScreen.WriteText(newText); } }
 			else MyScreenData.Append("\n LCD Error:\n '" + LCD_TAG[0] + LCD_TAG[5] + "' displays were not found.\n");
 			WriteSB();
 		}
@@ -725,9 +731,12 @@ class RaceBase
 	public string StartBeaconTag = "RW_Start", StopBeaconTag = "RW_Stop";
 	bool Ready = false;
 	public bool autoFlags = true;
+	public double secondsToCollision = 4;
+			int iteration = 0;
 	Transponder tp;
 	Program Parent;
-	List<IMyTerminalBlock> Blocks;
+	List<int> changedCars;
+    List<IMyTerminalBlock> Blocks;
 	public List<Car> Cars;
 	StringBuilder SBCars, SBLog;
 	SoundBlock SB;
@@ -737,7 +746,8 @@ class RaceBase
 		tp = trans; Parent = parent; SB = sb;
 		Blocks = new List<IMyTerminalBlock>();
 		Cars = new List<Car>();
-		Cars.Clear();
+        changedCars = new List<int>();
+        Cars.Clear();
 		SBCars = new StringBuilder();
 		SBLog = new StringBuilder();
 		UpdateBlocks();
@@ -782,7 +792,7 @@ class RaceBase
 				"| " + (car.IsSpeedLimited ? "LIMITED" : "").PadRight(8) +
 				"| " + (car.IsBoostOn ? "BOOST" : "").PadRight(6) +
 				"| " + (car.IsEngineOn ? " ON" : "OFF").PadRight(4) +
-				"| " + (car.Flag).PadRight(5) +
+				"| " + (car.returnedFlag).PadRight(5) +
 				"| " + (car.IsDisqualified ? "DSQ" : "").PadRight(3) + "\n");
 		}
 	}
@@ -806,7 +816,7 @@ class RaceBase
 				{
 					car.IsDisqualified = true; SBLog.Append(DateTime.Now.ToLongTimeString() + " | DSQ | " + car.PN + " | " + car.CurrentTire + " != " + car.OldTire + " | TIRE CHANGED OUTSIDE THE PITLANE\n");
 				}
-				else if (car.OldWear > car.CurrentWear && !car.IsOnPitlane)
+				else if (car.OldWear - car.CurrentWear > 0.2 && !car.IsOnPitlane)
 				{
 					car.IsDisqualified = true; SBLog.Append(DateTime.Now.ToLongTimeString()+" | DSQ | " + car.PN + " | " + car.CurrentWear +" < " + car.OldWear + " | LESS WEAR OUTSIDE THE PITLANE\n");
 				}
@@ -817,8 +827,10 @@ class RaceBase
 	void SendFlags()
 	{
 		double speedLimit = 10; // Ограничение по скорости
-		double yellowFlagDistance = 100; // Расстояние для желтого флага
 		double doubleYellowFlagDistance = 35; // Расстояние для двойного желтого флага
+		double collisionTreshold = 15;
+		changedCars.Clear();
+		bool noSlowCars = true;
 
 		for (int i = 0; i < Cars.Count; i++)
 		{
@@ -826,54 +838,90 @@ class RaceBase
 
 			if (currentCar.Speed < speedLimit && !currentCar.IsOnPitlane)
 			{
+				noSlowCars = false;
 				// Проверка для желтого флага и двойного желтого флага
 				for (int j = 0; j < Cars.Count; j++)
 				{
 					if (i != j)
 					{
 						Car otherCar = Cars[j];
-                        if (otherCar.IsOnPitlane) continue;
-                        double distance = Vector3D.Distance(currentCar.Position, otherCar.Position);
+						if (otherCar.IsOnPitlane) continue;
+						double distance = Vector3D.Distance(currentCar.Position, otherCar.Position);
 
-						if (distance <= yellowFlagDistance && otherCar.Flag == "")
-						{
-							tp.SendToCars(otherCar.PN.ToString(), "flag", "Yellow");
-                            SBLog.Append(DateTime.Now.ToLongTimeString() + " | FLAG | " + otherCar.PN + " | YELLOW | DUE TO " + currentCar.PN + " PROBLEMS\n");
-                        }
-                        else if (otherCar.Flag == "YEL" || otherCar.Flag == "DYEL")
-                        {
-                            tp.SendToCars(otherCar.PN.ToString(), "flag", "None");
-                            SBLog.Append(DateTime.Now.ToLongTimeString() + " | FLAG | " + otherCar.PN + " | NONE | RELEASE FROM YELLOW\n");
-                        }
-
-                        if (distance <= doubleYellowFlagDistance && otherCar.Speed < speedLimit && !otherCar.IsOnPitlane)
+						if (distance <= doubleYellowFlagDistance && otherCar.Speed < speedLimit && !otherCar.IsOnPitlane)
 						{
 							// Проверка для машин, находящихся на расстоянии 100 метров от двух машин
 							for (int k = 0; k < Cars.Count; k++)
 							{
-								Car thirdCar = Cars[k];
-								if (thirdCar.IsOnPitlane) continue;
-								double distanceToPair = Math.Min(
-									Vector3D.Distance(currentCar.Position, thirdCar.Position),
-									Vector3D.Distance(otherCar.Position, thirdCar.Position)
-								);
+								if (k != i && k != j)
+								{
+									Car thirdCar = Cars[k];
+									if (!thirdCar.IsOnPitlane && !changedCars.Contains(thirdCar.PN)){
+										double distanceToPair = Math.Min(
+											Vector3D.Distance(currentCar.Position, thirdCar.Position),
+											Vector3D.Distance(otherCar.Position, thirdCar.Position)
+										);
 
-								if (distanceToPair <= yellowFlagDistance && thirdCar.Flag == "")
-								{
-									tp.SendToCars(thirdCar.PN.ToString(), "flag", "DoubleYellow");
-									SBLog.Append(DateTime.Now.ToLongTimeString() + " | FLAG | " + thirdCar.PN + " | DOUBLE YELLOW | DUE TO COLLISION BETWEEN " + currentCar.PN + " AND " + otherCar.PN + "\n");
+										if (distanceToPair <= Math.Max(thirdCar.Speed * secondsToCollision, collisionTreshold))
+										{
+                                            changedCars.Add(thirdCar.PN);
+                                            if (thirdCar.localFlag == FlagType.None)
+											{
+												tp.SendToCars(thirdCar.PN.ToString(), "flag", "DoubleYellow");
+												thirdCar.localFlag = FlagType.DoubleYellow;
+												SBLog.Append(DateTime.Now.ToLongTimeString() + " | FLAG | " + thirdCar.PN + " | DOUBLE YELLOW | DUE TO COLLISION BETWEEN " + currentCar.PN + " AND " + otherCar.PN + "\n");
+											}
+										}
+										else if (thirdCar.localFlag == FlagType.Yellow || thirdCar.localFlag == FlagType.DoubleYellow)
+										{
+											tp.SendToCars(thirdCar.PN.ToString(), "flag", "None");
+											thirdCar.localFlag = FlagType.None;
+											SBLog.Append(DateTime.Now.ToLongTimeString() + " | FLAG | " + thirdCar.PN + " | NONE | RELEASE FROM DOUBLE YELLOW\n");
+										}
+									}
 								}
-								else if (thirdCar.Flag == "YEL" || thirdCar.Flag == "DYEL")
+							}
+						}
+						else
+						{
+							if (!changedCars.Contains(otherCar.PN)){
+								if (distance <= Math.Max(otherCar.Speed * secondsToCollision, collisionTreshold))
 								{
-									tp.SendToCars(thirdCar.PN.ToString(), "flag", "None");
-                                    SBLog.Append(DateTime.Now.ToLongTimeString() + " | FLAG | " + thirdCar.PN + " | NONE | RELEASE FROM DOUBLE YELLOW\n");
-                                }
+                                    changedCars.Add(otherCar.PN);
+                                    //SBLog.Append(DateTime.Now.ToLongTimeString() + " | FLAG | " + otherCar.PN + " | YELLOW | 0 Iter: " + iteration + " i: " + i + " J: " + j+"\n");
+									if (otherCar.localFlag == FlagType.None)
+									{
+										tp.SendToCars(otherCar.PN.ToString(), "flag", "Yellow");
+										otherCar.localFlag = FlagType.Yellow;
+										SBLog.Append(DateTime.Now.ToLongTimeString() + " | FLAG | " + otherCar.PN + " | YELLOW | DUE TO " + currentCar.PN + " PROBLEMS\n");
+									}
+								}
+								else if (otherCar.localFlag == FlagType.Yellow || otherCar.localFlag == FlagType.DoubleYellow)
+								{
+									//SBLog.Append(DateTime.Now.ToLongTimeString() + " | FLAG | " + otherCar.PN + " | YELLOW | 1 Iter: " + iteration + " i: " + i + " J: " + j + "\n");
+									tp.SendToCars(otherCar.PN.ToString(), "flag", "None");
+									otherCar.localFlag = FlagType.None;
+									SBLog.Append(DateTime.Now.ToLongTimeString() + " | FLAG | " + otherCar.PN + " | NONE | RELEASE FROM YELLOW\n");
+								}
 							}
 						}
 					}
 				}
 			}
 		}
+		if (noSlowCars)
+		{
+			foreach(var car in Cars)
+			{
+                if (car.localFlag == FlagType.Yellow || car.localFlag == FlagType.DoubleYellow)
+                {
+                    tp.SendToCars(car.PN.ToString(), "flag", "None");
+                    car.localFlag = FlagType.None;
+                    SBLog.Append(DateTime.Now.ToLongTimeString() + " | FLAG | " + car.PN + " | NONE | RELEASE FROM YELLOW (NO SLOW CARS)\n");
+                }
+            }
+		}
+		iteration++;
 	}
 
 	void UpdateTimeOffline()
@@ -934,7 +982,8 @@ class Car
 	public Vector3D Position { get; set; }
 	public Vector3D OldPosition { get; set; }
 	public double Speed { get; set; }
-	public string Flag { get; set; }
+	public string returnedFlag { get; set; }
+	public FlagType localFlag { get; set; }
 }
 #endregion
 #region Transponder
@@ -1004,14 +1053,14 @@ class Transponder
 					existingCar.IsEngineOn = engine;
 					existingCar.OldPosition = existingCar.Position;
 					existingCar.Position = carPosition;
-					existingCar.Flag = flag;
+					existingCar.returnedFlag = flag;
 					existingCar.Speed = speed;
 					existingCar.TimeOffline = 0;
 				}
 				else
 				{
 					existingCar = new Car() { Log = "",CurrentTire = tire, OldTire = tire, PN = pn, CurrentWear = wear, OldWear = wear, FuelPercent = fuel, IsOnPitlane = pitlane,
-					IsSpeedLimited = limiter, IsBoostOn = boost, IsEngineOn = engine, IsDisqualified = false, OldPosition = carPosition, Position = carPosition, Speed = speed, Flag = flag, TimeOffline = 0};
+					IsSpeedLimited = limiter, IsBoostOn = boost, IsEngineOn = engine, IsDisqualified = false, OldPosition = carPosition, Position = carPosition, Speed = speed, returnedFlag = flag, localFlag = FlagType.None, TimeOffline = 0};
 					cars.Add(existingCar);
 				}
 			}
@@ -1503,6 +1552,7 @@ class Controller
 
 		SBNav.Append(" TO PITLANE [" + (distanceToPitLane) + "]\n");
 		SBNav.Append(" TO BASE [" + (distanceToBase) + "]\n");
+		SBNav.Append(" FLAG [" + GetFlagType(currentFlag, true) + "]\n");
 
 	}
 
@@ -1519,6 +1569,7 @@ class Controller
 		if (Enum.TryParse(type, out flag)) currentFlag = flag;
 		if(lastFlag != currentFlag)
 		{
+			tp.SendLogToBase(pN, (DateTime.Now.ToLongTimeString() + " / FLAG / " + pN + " / SET FLAG TO "+ GetFlagType(currentFlag, true)+"\n"));
 			switch (currentFlag)
 			{
 				case FlagType.None: SB.Request("GreenFlag"); break;
@@ -1530,14 +1581,14 @@ class Controller
 			}
 		}
 	}
-	string GetFlagType(FlagType Flag)
+	string GetFlagType(FlagType Flag, bool navDisplay = false)
 	{
 		string flag = "";
 		switch (Flag)
 		{
-			case FlagType.None: flag = ""; break;
-			case FlagType.Yellow: flag = "YEL"; break;
-			case FlagType.DoubleYellow: flag = "DYEL"; break;
+			case FlagType.None: flag = navDisplay ? "GREEN" : ""; break;
+			case FlagType.Yellow: flag = navDisplay ? "YELLOW" : "YEL"; break;
+			case FlagType.DoubleYellow: flag = navDisplay ? "DB YELLOW" : "DYEL"; break;
 			case FlagType.Red: flag = "RED"; break;
 			case FlagType.Blue: flag = "BLUE"; break;
 
