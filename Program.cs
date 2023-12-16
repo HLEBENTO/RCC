@@ -25,6 +25,7 @@ partial class Program : MyGridProgram
 {
 //=============================================================
 //There's a little bit left over from PAS, since I was basing it on it
+//КОПИРОВАТЬ ОТСЮДА
 #region Global
 string WorkMode = "car", LastWorkMode = "";
 bool Init = true, Init2 = true, changeMode = false;
@@ -848,7 +849,7 @@ class RaceBase
 						if (otherCar.IsOnPitlane) continue;
 						double distance = Vector3D.Distance(currentCar.Position, otherCar.Position);
 
-						if (distance <= doubleYellowFlagDistance && otherCar.Speed < speedLimit && !otherCar.IsOnPitlane)
+						/* if (distance <= doubleYellowFlagDistance && otherCar.Speed < speedLimit && !otherCar.IsOnPitlane)
 						{
 							// Проверка для машин, находящихся на расстоянии 100 метров от двух машин
 							for (int k = 0; k < Cars.Count; k++)
@@ -883,7 +884,7 @@ class RaceBase
 							}
 						}
 						else
-						{
+						{*/
 							if (!changedCars.Contains(otherCar.PN)){
 								if (distance <= Math.Max(otherCar.Speed * secondsToCollision, collisionTreshold))
 								{
@@ -904,7 +905,7 @@ class RaceBase
 									SBLog.Append(DateTime.Now.ToLongTimeString() + " | FLAG | " + otherCar.PN + " | NONE | RELEASE FROM YELLOW\n");
 								}
 							}
-						}
+						//}
 					}
 				}
 			}
@@ -2132,6 +2133,6 @@ class Controller
 	}
 	#endregion
 }
-//=== End Of Script ===
+//=== End Of Script === ЗАКОНЧИТЬ КОПИРОВАТЬ ЗДЕСЬ
 }
 }
